@@ -13,8 +13,11 @@
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/thread.h"
 #include <cassert>
+#include <cstdlib>
 #include <mutex>
+#if !defined(__wasi__)
 #include <setjmp.h>
+#endif
 
 using namespace llvm;
 
@@ -31,7 +34,9 @@ struct CrashRecoveryContextImpl {
   const CrashRecoveryContextImpl *Next;
 
   CrashRecoveryContext *CRC;
+#if !defined(__wasi__)
   ::jmp_buf JumpBuffer;
+#endif
   volatile unsigned Failed : 1;
   unsigned SwitchedThread : 1;
   unsigned ValidJumpBuffer : 1;
@@ -73,8 +78,10 @@ public:
     CRC->RetCode = RetCode;
 
     // Jump back to the RunSafely we were called under.
+#if !defined(__wasi__)
     if (ValidJumpBuffer)
       longjmp(JumpBuffer, 1);
+#endif
 
     // Otherwise let the caller decide of the outcome of the crash. Currently
     // this occurs when using SEH on Windows with MSVC or clang-cl.
@@ -181,7 +188,19 @@ CrashRecoveryContext::unregisterCleanup(CrashRecoveryContextCleanup *cleanup) {
   delete cleanup;
 }
 
-#if defined(_MSC_VER)
+#if defined(__wasi__)
+
+static void installExceptionOrSignalHandlers() {}
+static void uninstallExceptionOrSignalHandlers() {}
+
+bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
+  // WASI has no process signals or setjmp/longjmp crash recovery. A WebAssembly
+  // trap terminates the invocation, so there is nothing useful to recover here.
+  Fn();
+  return true;
+}
+
+#elif defined(_MSC_VER)
 
 #include <windows.h> // for GetExceptionInformation
 
@@ -427,10 +446,12 @@ bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
   return true;
 }
 
-#endif // !_MSC_VER
+#endif // platform crash recovery
 
 [[noreturn]] void CrashRecoveryContext::HandleExit(int RetCode) {
-#if defined(_WIN32)
+#if defined(__wasi__)
+  std::exit(RetCode);
+#elif defined(_WIN32)
   // Since the exception code is actually of NTSTATUS type, we use the
   // Microsoft-recommended 0xE prefix, to signify that this is a user error.
   // This value is a combination of the customer field (bit 29) and severity
@@ -447,7 +468,9 @@ bool CrashRecoveryContext::RunSafely(function_ref<void()> Fn) {
 }
 
 bool CrashRecoveryContext::isCrash(int RetCode) {
-#if defined(_WIN32)
+#if defined(__wasi__)
+  return false;
+#elif defined(_WIN32)
   // On Windows, the code is interpreted as NTSTATUS. The two high bits
   // represent the severity. Values starting with 0x80000000 are reserved for
   // "warnings"; values of 0xC0000000 and up are for "errors". In practice, both
@@ -467,7 +490,9 @@ bool CrashRecoveryContext::isCrash(int RetCode) {
 bool CrashRecoveryContext::throwIfCrash(int RetCode) {
   if (!isCrash(RetCode))
     return false;
-#if defined(_WIN32)
+#if defined(__wasi__)
+  return false;
+#elif defined(_WIN32)
   ::RaiseException(RetCode, 0, 0, NULL);
 #else
   llvm::sys::unregisterHandlers();

@@ -41,6 +41,57 @@
 
 using namespace llvm;
 
+#if defined(__wasi__)
+
+static Error wasiSocketError(StringRef Message) {
+  return llvm::make_error<StringError>(
+      std::make_error_code(std::errc::operation_not_supported), Message);
+}
+
+ListeningSocket::ListeningSocket(int SocketFD, StringRef Path, int FDs[2])
+    : FD(SocketFD), SocketPath(Path), PipeFD{FDs[0], FDs[1]} {}
+
+ListeningSocket::ListeningSocket(ListeningSocket &&LS)
+    : FD(LS.FD.load()), SocketPath(std::move(LS.SocketPath)),
+      PipeFD{LS.PipeFD[0], LS.PipeFD[1]} {
+  LS.FD = -1;
+  LS.PipeFD[0] = -1;
+  LS.PipeFD[1] = -1;
+}
+
+ListeningSocket::~ListeningSocket() { shutdown(); }
+
+Expected<ListeningSocket> ListeningSocket::createUnix(StringRef, int) {
+  return wasiSocketError("UNIX sockets are not supported by WASI");
+}
+
+Expected<std::unique_ptr<raw_socket_stream>>
+ListeningSocket::accept(const std::chrono::milliseconds &) {
+  return wasiSocketError("UNIX sockets are not supported by WASI");
+}
+
+void ListeningSocket::shutdown() { FD = -1; }
+
+raw_socket_stream::raw_socket_stream(int SocketFD)
+    : raw_fd_stream(SocketFD, true) {}
+raw_socket_stream::~raw_socket_stream() = default;
+
+Expected<std::unique_ptr<raw_socket_stream>>
+raw_socket_stream::createConnectedUnix(StringRef) {
+  return wasiSocketError("UNIX sockets are not supported by WASI");
+}
+
+ssize_t raw_socket_stream::read(char *, size_t,
+                                const std::chrono::milliseconds &) {
+  std::error_code EC =
+      std::make_error_code(std::errc::operation_not_supported);
+  raw_fd_stream::error_detected(EC);
+  return -1;
+}
+
+#else
+
+
 #ifdef _WIN32
 WSABalancer::WSABalancer() {
   WSADATA WsaData;
@@ -356,3 +407,5 @@ ssize_t raw_socket_stream::read(char *Ptr, size_t Size,
   }
   return raw_fd_stream::read(Ptr, Size);
 }
+
+#endif // __wasi__

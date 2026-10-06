@@ -353,7 +353,9 @@ static bool printMarkupStackTrace(StringRef Argv0, void **StackTrace, int Depth,
 }
 
 // Include the platform-specific parts of this class.
-#ifdef LLVM_ON_UNIX
+#if defined(__wasi__)
+#include "WASI/Signals.inc"
+#elif defined(LLVM_ON_UNIX)
 #include "Unix/Signals.inc"
 #endif
 #ifdef _WIN32

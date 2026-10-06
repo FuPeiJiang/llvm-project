@@ -26,12 +26,14 @@
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
-#ifdef HAVE_SYS_MMAN_H
+#if defined(HAVE_SYS_MMAN_H) || defined(__wasi__)
 #include <sys/mman.h>
 #endif
 
 #include <dirent.h>
+#if !defined(__wasi__)
 #include <pwd.h>
+#endif
 
 #ifdef __APPLE__
 #include <copyfile.h>
@@ -326,6 +328,11 @@ std::string getMainExecutable(const char *argv0, void *MainAddr) {
       return std::string(real_path);
     break; // Found entry, but realpath failed.
   }
+#elif defined(__wasi__)
+  // WASI has no process image lookup. argv[0] is supplied by the embedding
+  // runtime and is the best available executable identity.
+  if (argv0)
+    return std::string(argv0);
 #elif defined(HAVE_DLOPEN)
   // Use dladdr to get executable path if available.
   Dl_info DLInfo;
@@ -564,6 +571,10 @@ static bool is_local_impl(struct STATVFS &Vfs) {
   // The file system can have an arbitrary structure on z/OS; must go with the
   // conservative answer.
   return false;
+#elif defined(__wasi__)
+  // Browser WASI exposes only explicitly preopened filesystems; there is no
+  // remote-mount distinction or MNT_LOCAL flag.
+  return true;
 #else
   return !!(STATVFS_F_FLAG(Vfs) & MNT_LOCAL);
 #endif
@@ -697,8 +708,10 @@ static void expandTildeExpr(SmallVectorImpl<char> &Path) {
     return;
   }
 
-  // This is a string of the form ~username/, look up this user's entry in the
-  // password database.
+  // WASI has no password database, so only ~ (via $HOME) is meaningful.
+#if defined(__wasi__)
+  return;
+#else
   std::unique_ptr<char[]> Buf;
   long BufSize = sysconf(_SC_GETPW_R_SIZE_MAX);
   if (BufSize <= 0)
@@ -709,15 +722,14 @@ static void expandTildeExpr(SmallVectorImpl<char> &Path) {
   struct passwd *Entry = nullptr;
   getpwnam_r(User.c_str(), &Pwd, Buf.get(), BufSize, &Entry);
 
-  if (!Entry || !Entry->pw_dir) {
-    // Unable to look up the entry, just return back the original path.
+  if (!Entry || !Entry->pw_dir)
     return;
-  }
 
   Storage = Remainder;
   Path.clear();
   Path.append(Entry->pw_dir, Entry->pw_dir + strlen(Entry->pw_dir));
   llvm::sys::path::append(Path, Storage);
+#endif
 }
 
 void expand_tilde(const Twine &path, SmallVectorImpl<char> &dest) {
@@ -798,11 +810,16 @@ std::error_code status(int FD, file_status &Result) {
 }
 
 unsigned getUmask() {
+#if defined(__wasi__)
+  // WASI has no process-global umask.
+  return 0;
+#else
   // Chose arbitary new mask and reset the umask to the old mask.
   // umask(2) never fails so ignore the return of the second call.
   unsigned Mask = ::umask(0);
   (void)::umask(Mask);
   return Mask;
+#endif
 }
 
 std::error_code setPermissions(const Twine &Path, perms Permissions) {
@@ -916,8 +933,8 @@ void mapped_file_region::dontNeedImpl() {
   assert(Mode == mapped_file_region::readonly);
   if (!Mapping)
     return;
-#if defined(__MVS__) || defined(_AIX)
-    // If we don't have madvise, or it isn't beneficial, treat this as a no-op.
+#if defined(__MVS__) || defined(_AIX) || defined(__wasi__)
+  // If we don't have madvise, or it isn't beneficial, treat this as a no-op.
 #elif defined(POSIX_MADV_DONTNEED)
   ::posix_madvise(Mapping, Size, POSIX_MADV_DONTNEED);
 #else
@@ -929,7 +946,7 @@ void mapped_file_region::willNeedImpl() {
   assert(Mode == mapped_file_region::readonly);
   if (!Mapping)
     return;
-#if defined(__MVS__) || defined(_AIX)
+#if defined(__MVS__) || defined(_AIX) || defined(__wasi__)
   // If we don't have madvise, or it isn't beneficial, treat this as a no-op.
 #elif defined(POSIX_MADV_WILLNEED)
   ::posix_madvise(Mapping, Size, POSIX_MADV_WILLNEED);
@@ -1292,6 +1309,14 @@ Expected<size_t> readNativeFileSlice(file_t FD, MutableArrayRef<char> Buf,
 
 std::error_code tryLockFile(int FD, std::chrono::milliseconds Timeout,
                             LockKind Kind) {
+#if defined(__wasi__)
+  // A browser WASI instance has no cross-process advisory record locks.
+  // Compilation is single-process, so there is nothing external to arbitrate.
+  (void)FD;
+  (void)Timeout;
+  (void)Kind;
+  return std::error_code();
+#else
   auto Start = std::chrono::steady_clock::now();
   auto End = Start + Timeout;
   do {
@@ -1318,9 +1343,15 @@ std::error_code tryLockFile(int FD, std::chrono::milliseconds Timeout,
     usleep(1000);
   } while (std::chrono::steady_clock::now() < End);
   return make_error_code(errc::no_lock_available);
+#endif
 }
 
 std::error_code lockFile(int FD, LockKind Kind) {
+#if defined(__wasi__)
+  (void)FD;
+  (void)Kind;
+  return std::error_code();
+#else
   struct flock Lock;
   memset(&Lock, 0, sizeof(Lock));
   switch (Kind) {
@@ -1337,9 +1368,14 @@ std::error_code lockFile(int FD, LockKind Kind) {
   if (::fcntl(FD, F_SETLKW, &Lock) != -1)
     return std::error_code();
   return errnoAsErrorCode();
+#endif
 }
 
 std::error_code unlockFile(int FD) {
+#if defined(__wasi__)
+  (void)FD;
+  return std::error_code();
+#else
   struct flock Lock;
   Lock.l_type = F_UNLCK;
   Lock.l_whence = SEEK_SET;
@@ -1348,6 +1384,7 @@ std::error_code unlockFile(int FD) {
   if (::fcntl(FD, F_SETLK, &Lock) != -1)
     return std::error_code();
   return errnoAsErrorCode();
+#endif
 }
 
 std::error_code closeFile(file_t &F) {
@@ -1423,11 +1460,19 @@ std::error_code real_path(const Twine &path, SmallVectorImpl<char> &dest,
 }
 
 std::error_code changeFileOwnership(int FD, uint32_t Owner, uint32_t Group) {
+#if defined(__wasi__)
+  // WASI has no uid/gid ownership model for preopened browser filesystems.
+  (void)FD;
+  (void)Owner;
+  (void)Group;
+  return std::error_code();
+#else
   auto FChown = [&]() { return ::fchown(FD, Owner, Group); };
   // Retry if fchown call fails due to interruption.
   if ((sys::RetryAfterSignal(-1, FChown)) < 0)
     return errnoAsErrorCode();
   return std::error_code();
+#endif
 }
 
 } // end namespace fs
@@ -1437,6 +1482,7 @@ namespace path {
 bool home_directory(SmallVectorImpl<char> &result) {
   std::unique_ptr<char[]> Buf;
   char *RequestedDir = getenv("HOME");
+#if !defined(__wasi__)
   if (!RequestedDir) {
     long BufSize = sysconf(_SC_GETPW_R_SIZE_MAX);
     if (BufSize <= 0)
@@ -1448,6 +1494,7 @@ bool home_directory(SmallVectorImpl<char> &result) {
     if (pw && pw->pw_dir)
       RequestedDir = pw->pw_dir;
   }
+#endif
   if (!RequestedDir)
     return false;
 

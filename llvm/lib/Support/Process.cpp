@@ -118,7 +118,9 @@ bool Process::AreCoreFilesPrevented() { return coreFilesPrevented; }
 }
 
 // Include the platform-specific parts of this class.
-#ifdef LLVM_ON_UNIX
+#if defined(__wasi__)
+#include "WASI/Process.inc"
+#elif defined(LLVM_ON_UNIX)
 #include "Unix/Process.inc"
 #endif
 #ifdef _WIN32

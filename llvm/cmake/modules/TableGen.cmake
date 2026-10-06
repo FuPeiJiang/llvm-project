@@ -210,6 +210,13 @@ macro(add_tablegen target project)
     set_target_properties(${target} PROPERTIES EXCLUDE_FROM_ALL ON)
   endif()
 
+  # When an external/native TableGen executable is supplied for a cross build,
+  # keep the target executable available as an explicit target but do not make
+  # it part of the default `all` target.
+  if(NOT "${${project}_TABLEGEN}" STREQUAL "${target}")
+    set_target_properties(${target} PROPERTIES EXCLUDE_FROM_ALL ON)
+  endif()
+
   # Effective tblgen executable to be used:
   set(${project}_TABLEGEN_EXE ${${project}_TABLEGEN} PARENT_SCOPE)
   set(${project}_TABLEGEN_TARGET ${${project}_TABLEGEN} PARENT_SCOPE)
